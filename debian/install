@@ -1,0 +1,1 @@
+out-of-tree/*   usr/src/ntfsplus-${env:DEB_VERSION_UPSTREAM}/

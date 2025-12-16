@@ -1,0 +1,5 @@
+ntfsplus-dkms (0+git20251216+ds-1) experimental; urgency=medium
+
+  * Initial release. (Closes: #1123539)
+
+ -- Alex Myczko <tar@debian.org>  Tue, 16 Dec 2025 14:24:06 +0000

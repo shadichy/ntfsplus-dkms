@@ -1,0 +1,21 @@
+Source: ntfsplus-dkms
+Section: kernel
+Priority: optional
+Maintainer: Alex Myczko <tar@debian.org>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-sequence-dkms,
+Standards-Version: 4.7.2
+Homepage: https://github.com/shadichy/ntfsplus-dkms
+Testsuite: autopkgtest-pkg-dkms
+Vcs-Browser: https://salsa.debian.org/debian/ntfsplus-dkms
+Vcs-Git: https://salsa.debian.org/debian/ntfsplus-dkms.git
+
+Package: ntfsplus-dkms
+Architecture: all
+Depends:
+ ${misc:Depends},
+Description: DKMS kernel driver for ntfsplus
+ This contains the out-of-tree kernel module for ntfsplus.
+ .
+ This only supports Linux kernels 6.12+.
