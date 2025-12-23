@@ -1,0 +1,46 @@
+pkgbase = ntfsplus-dkms-git
+	pkgdesc = A new NTFS driver for Linux promised to be better than NTFS3. These patches are directly taken from the maintainer's mailing list posts. Backported to 6.12.
+	pkgver = 2025.11.27.r8.3f937573c
+	pkgrel = 1
+	url = https://github.com/shadichy/ntfsplus-dkms
+	arch = any
+	license = GPL-2.0-only
+	makedepends = git
+	optdepends = ntfsprogs-plus: Recommended NTFS utilities
+	options = !strip
+	options = !emptydirs
+	source = linux::shallowclone+https://git.kernel.org/pub/scm/linux/kernel/git/linkinjeon/ntfs.git?branch=ntfs-next
+	source = 0001-fs-ntfsplus-inode.c-Resolve-import-for-inode_generic.patch
+	source = 0002-ntfsplus-Resolve-iomap_-arguments-temporarily-for-ke.patch
+	source = 0003-ntfsplus-Backport-ntfs_iomap.c-functions-to-kernels-.patch
+	source = 0004-ntfsplus-file.c-Using-mmap-instead-of-mmap_prepare-f.patch
+	source = 0005-ntfsplus-compress.c-using-page-index-instead-of-page.patch
+	source = 0006-ntfsplus-Update-iomap_zero_range-iomap_page_mkwrite-.patch
+	source = 0007-ntfsplus-Backport-ntfs_mkdir-for-kernels-older-than-.patch
+	source = 0099-fs-ntfsplus-Makefile-DKMS-patch.patch
+	source = dkms.conf
+	source = 90-udev-prefer-ntfsplus.rules
+	sha256sums = SKIP
+	sha256sums = e848246d1cee6042c2bc8af1809b3cd348c2289749394ae363c8951cda69b32f
+	sha256sums = 4bdb0d5c97bd676ee077d9ffccbaf67eadf232b23c3e9fe060780df6420e9513
+	sha256sums = 78353b18ad7e37d390d79bc22f424a8042351e30eb01a17e4e7ffadafb6c7dce
+	sha256sums = f8dbf89bfa7891adcba1c9900a8b4f31c59a6e32bf3c4b1b290073eed048e8d9
+	sha256sums = 0e971dcea24f447ee4349cab0764a55c8311cf668ce56343d1c1b325777e624d
+	sha256sums = 42d1b84476b71fb5cce03273cb1075698639c788b4307374c166d163370dbcc8
+	sha256sums = 89d0665e7e6ebabce544d008e6a18e8c2182e1c21692ac17fd5d466bed9591b2
+	sha256sums = e217fa145f507b1e07e228e746528554f705f44fd5744f293b302b29df764b96
+	sha256sums = 99e3d34a646c13fd207b3d88265fb3fc2b7a0b88fd3461f0dc75669e7260ffc4
+	sha256sums = e3866cac3d71da15740159c89b233d4d1f61981dbf737d4e3bc9a4c56bfa24be
+
+pkgname = ntfsplus-dkms-git
+	pkgdesc = DKMS module for ntfsplus (A new NTFS driver for Linux promised to be better than NTFS3).
+	depends = dkms
+	optdepends = ntfsprogs-plus: Recommended NTFS utilities
+	optdepends = ntfsplus-udev: udev rules for ntfsplus
+	provides = ntfsplus
+	provides = NTFSPLUS-MODULE
+	conflicts = ntfsplus
+
+pkgname = ntfsplus-udev
+	pkgdesc = udev rules for ntfsplus.
+	depends = udev
