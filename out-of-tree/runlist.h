@@ -34,12 +34,13 @@ struct runlist_element { /* In memory vcn to lcn mapping structure element. */
  * runlist - in memory vcn to lcn mapping array including a read/write lock
  * @rl:		pointer to an array of runlist elements
  * @lock:	read/write spinlock for serializing access to @rl
- *
+ * @rl_hint:	hint/cache pointing to the last accessed runlist element
  */
 struct runlist {
 	struct runlist_element *rl;
 	struct rw_semaphore lock;
 	size_t count;
+	int rl_hint;
 };
 
 static inline void ntfs_init_runlist(struct runlist *rl)
@@ -47,6 +48,7 @@ static inline void ntfs_init_runlist(struct runlist *rl)
 	rl->rl = NULL;
 	init_rwsem(&rl->lock);
 	rl->count = 0;
+	rl->rl_hint = -1;
 }
 
 enum {

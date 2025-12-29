@@ -15,19 +15,16 @@
 #include "attrib.h"
 #include "mft.h"
 #include "ntfs.h"
-#include "misc.h"
-#include "ntfs_iomap.h"
+#include "debug.h"
+#include "iomap.h"
 
-static s64 ntfs_convert_page_index_into_lcn(struct ntfs_volume *vol, struct ntfs_inode *ni,
-		unsigned long page_index)
+static s64 ntfs_convert_folio_index_into_lcn(struct ntfs_volume *vol, struct ntfs_inode *ni,
+		unsigned long folio_index)
 {
-	sector_t iblock;
 	s64 vcn;
 	s64 lcn;
-	unsigned char blocksize_bits = vol->sb->s_blocksize_bits;
 
-	iblock = (s64)page_index << (PAGE_SHIFT - blocksize_bits);
-	vcn = (s64)iblock << blocksize_bits >> vol->cluster_size_bits;
+	vcn = NTFS_PIDX_TO_CLU(vol, folio_index);
 
 	down_read(&ni->runlist.lock);
 	lcn = ntfs_attr_vcn_to_lcn_nolock(ni, vcn, false);
@@ -36,19 +33,10 @@ static s64 ntfs_convert_page_index_into_lcn(struct ntfs_volume *vol, struct ntfs
 	return lcn;
 }
 
-struct bio *ntfs_setup_bio(struct ntfs_volume *vol, blk_opf_t opf, s64 lcn,
-		unsigned int pg_ofs)
-{
-	struct bio *bio;
-
-	bio = bio_alloc(vol->sb->s_bdev, 1, opf, GFP_NOIO);
-	if (!bio)
-		return NULL;
-	bio->bi_iter.bi_sector = ((lcn << vol->cluster_size_bits) + pg_ofs) >>
-		vol->sb->s_blocksize_bits;
-
-	return bio;
-}
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
+#define iomap_bio_read_folio iomap_read_folio
+#define iomap_bio_readahead iomap_readahead
+#endif
 
 /**
  * ntfs_read_folio - fill a @folio of a @file with data from the device
@@ -70,30 +58,7 @@ struct bio *ntfs_setup_bio(struct ntfs_volume *vol, blk_opf_t opf, s64 lcn,
  */
 static int ntfs_read_folio(struct file *file, struct folio *folio)
 {
-	loff_t i_size;
-	struct inode *vi;
-	struct ntfs_inode *ni;
-
-	vi = folio->mapping->host;
-	i_size = i_size_read(vi);
-	/* Is the page fully outside i_size? (truncate in progress) */
-	if (unlikely(folio->index >= (i_size + PAGE_SIZE - 1) >>
-			PAGE_SHIFT)) {
-		folio_zero_segment(folio, 0, PAGE_SIZE);
-		ntfs_debug("Read outside i_size - truncated?");
-		folio_mark_uptodate(folio);
-		folio_unlock(folio);
-		return 0;
-	}
-	/*
-	 * This can potentially happen because we clear PageUptodate() during
-	 * ntfs_writepage() of MstProtected() attributes.
-	 */
-	if (folio_test_uptodate(folio)) {
-		folio_unlock(folio);
-		return 0;
-	}
-	ni = NTFS_I(vi);
+	struct ntfs_inode *ni = NTFS_I(folio->mapping->host);
 
 	/*
 	 * Only $DATA attributes can be encrypted and only unnamed $DATA
@@ -114,7 +79,8 @@ static int ntfs_read_folio(struct file *file, struct folio *folio)
 			return ntfs_read_compressed_block(folio);
 	}
 
-	return iomap_read_folio(folio, &ntfs_read_iomap_ops);
+	iomap_bio_read_folio(folio, &ntfs_read_iomap_ops);
+	return 0;
 }
 
 static int ntfs_write_mft_block(struct ntfs_inode *ni, struct folio *folio,
@@ -129,15 +95,15 @@ static int ntfs_write_mft_block(struct ntfs_inode *ni, struct folio *folio,
 	unsigned long mft_no;
 	struct ntfs_inode *tni;
 	s64 lcn;
-	s64 vcn = (s64)folio->index << PAGE_SHIFT >> vol->cluster_size_bits;
-	s64 end_vcn = ni->allocated_size >> vol->cluster_size_bits;
+	s64 vcn = NTFS_PIDX_TO_CLU(vol, folio->index);
+	s64 end_vcn = NTFS_B_TO_CLU(vol, ni->allocated_size);
 	unsigned int folio_sz;
 	struct runlist_element *rl;
 
 	ntfs_debug("Entering for inode 0x%lx, attribute type 0x%x, folio index 0x%lx.",
 			vi->i_ino, ni->type, folio->index);
 
-	lcn = ntfs_convert_page_index_into_lcn(vol, ni, folio->index);
+	lcn = ntfs_convert_folio_index_into_lcn(vol, ni, folio->index);
 	if (lcn <= LCN_HOLE) {
 		folio_start_writeback(folio);
 		folio_unlock(folio);
@@ -155,13 +121,26 @@ static int ntfs_write_mft_block(struct ntfs_inode *ni, struct folio *folio,
 		/* Get the mft record number. */
 		mft_no = (((s64)folio->index << PAGE_SHIFT) + mft_ofs) >>
 			vol->mft_record_size_bits;
-		vcn = mft_no << vol->mft_record_size_bits >> vol->cluster_size_bits;
+		vcn = NTFS_MFT_NR_TO_CLU(vol, mft_no);
 		/* Check whether to write this mft record. */
 		tni = NULL;
 		if (ntfs_may_write_mft_record(vol, mft_no,
 					(struct mft_record *)(kaddr + mft_ofs), &tni)) {
 			unsigned int mft_record_off = 0;
 			s64 vcn_off = vcn;
+
+			/*
+			 * Skip $MFT extent mft records and let them being written
+			 * by writeback to avioid deadlocks. the $MFT runlist
+			 * lock must be taken before $MFT extent mrec_lock is taken.
+			 */
+			if (tni && tni->nr_extents < 0 &&
+				tni->ext.base_ntfs_ino == NTFS_I(vol->mft_ino)) {
+				mutex_unlock(&tni->mrec_lock);
+				atomic_dec(&tni->count);
+				iput(vol->mft_ino);
+				continue;
+			}
 
 			/*
 			 * The record should be written.  If a locked ntfs
@@ -204,11 +183,10 @@ flush_bio:
 				off = ((mft_no << vol->mft_record_size_bits) +
 				       mft_record_off) & vol->cluster_size_mask;
 
-				bio = ntfs_setup_bio(vol, REQ_OP_WRITE, lcn, off);
-				if (!bio) {
-					err = -ENOMEM;
-					goto unm_done;
-				}
+				bio = bio_alloc(vol->sb->s_bdev, 1, REQ_OP_WRITE,
+						GFP_NOIO);
+				bio->bi_iter.bi_sector =
+					NTFS_B_TO_SECTOR(vol, NTFS_CLU_TO_B(vol, lcn) + off);
 			}
 
 			if (vol->cluster_size == NTFS_BLOCK_SIZE &&
@@ -313,11 +291,12 @@ static sector_t ntfs_bmap(struct address_space *mapping, sector_t block)
 	struct ntfs_inode *ni = NTFS_I(mapping->host);
 	struct ntfs_volume *vol = ni->vol;
 	unsigned int delta;
-	unsigned char blocksize_bits, cluster_size_shift;
+	unsigned char blocksize_bits;
 
 	ntfs_debug("Entering for mft_no 0x%lx, logical block 0x%llx.",
 			ni->mft_no, (unsigned long long)block);
-	if (ni->type != AT_DATA || !NInoNonResident(ni) || NInoEncrypted(ni)) {
+	if (ni->type != AT_DATA || !NInoNonResident(ni) || NInoEncrypted(ni) ||
+	    NInoMstProtected(ni)) {
 		ntfs_error(vol->sb, "BMAP does not make sense for %s attributes, returning 0.",
 				(ni->type != AT_DATA) ? "non-data" :
 				(!NInoNonResident(ni) ? "resident" :
@@ -339,9 +318,8 @@ static sector_t ntfs_bmap(struct address_space *mapping, sector_t block)
 	 */
 	if (unlikely(ofs >= size || (ofs + blocksize > size && size < i_size)))
 		goto hole;
-	cluster_size_shift = vol->cluster_size_bits;
 	down_read(&ni->runlist.lock);
-	lcn = ntfs_attr_vcn_to_lcn_nolock(ni, ofs >> cluster_size_shift, false);
+	lcn = ntfs_attr_vcn_to_lcn_nolock(ni, NTFS_B_TO_CLU(vol, ofs), false);
 	up_read(&ni->runlist.lock);
 	if (unlikely(lcn < LCN_HOLE)) {
 		/*
@@ -385,7 +363,7 @@ hole:
 	 */
 	delta = ofs & vol->cluster_size_mask;
 	if (unlikely(sizeof(block) < sizeof(lcn))) {
-		block = lcn = ((lcn << cluster_size_shift) + delta) >>
+		block = lcn = (NTFS_CLU_TO_B(vol, lcn) + delta) >>
 				blocksize_bits;
 		/* If the block number was truncated return 0. */
 		if (unlikely(block != lcn)) {
@@ -395,7 +373,7 @@ hole:
 			return 0;
 		}
 	} else
-		block = ((lcn << cluster_size_shift) + delta) >>
+		block = (NTFS_CLU_TO_B(vol, lcn) + delta) >>
 				blocksize_bits;
 	ntfs_debug("Done (returning block 0x%llx).", (unsigned long long)lcn);
 	return block;
@@ -412,11 +390,7 @@ static void ntfs_readahead(struct readahead_control *rac)
 		return;
 	}
 
-	if (NInoMstProtected(ni) &&
-	    (ni->mft_no == FILE_MFT || ni->mft_no == FILE_MFTMirr))
-		return;
-
-	iomap_readahead(rac, &ntfs_read_iomap_ops);
+	iomap_bio_readahead(rac, &ntfs_read_iomap_ops);
 }
 
 static int ntfs_mft_writepage(struct folio *folio, struct writeback_control *wbc)
@@ -493,13 +467,7 @@ static int ntfs_swap_activate(struct swap_info_struct *sis,
 			&ntfs_read_iomap_ops);
 }
 
-/**
- * ntfs_normal_aops - address space operations for normal inodes and attributes
- *
- * Note these are not used for compressed or mst protected inodes and
- * attributes.
- */
-const struct address_space_operations ntfs_normal_aops = {
+const struct address_space_operations ntfs_aops = {
 	.read_folio		= ntfs_read_folio,
 	.readahead		= ntfs_readahead,
 	.writepages		= ntfs_writepages,
@@ -514,37 +482,6 @@ const struct address_space_operations ntfs_normal_aops = {
 	.swap_activate          = ntfs_swap_activate,
 };
 
-/**
- * ntfs_compressed_aops - address space operations for compressed inodes
- */
-const struct address_space_operations ntfs_compressed_aops = {
-	.read_folio		= ntfs_read_folio,
-	.direct_IO		= noop_direct_IO,
-	.writepages		= ntfs_writepages,
-	.dirty_folio		= iomap_dirty_folio,
-	.migrate_folio		= filemap_migrate_folio,
-	.is_partially_uptodate	= iomap_is_partially_uptodate,
-	.error_remove_folio	= generic_error_remove_folio,
-	.release_folio		= iomap_release_folio,
-	.invalidate_folio	= iomap_invalidate_folio,
-};
-
-/**
- * ntfs_mst_aops - general address space operations for mst protecteed inodes
- *		   and attributes
- */
-const struct address_space_operations ntfs_mst_aops = {
-	.read_folio		= ntfs_read_folio,	/* Fill page with data. */
-	.readahead		= ntfs_readahead,
-	.writepages		= ntfs_writepages,	/* Write dirty page to disk. */
-	.dirty_folio		= iomap_dirty_folio,
-	.migrate_folio		= filemap_migrate_folio,
-	.is_partially_uptodate	= iomap_is_partially_uptodate,
-	.error_remove_folio	= generic_error_remove_folio,
-	.release_folio		= iomap_release_folio,
-	.invalidate_folio	= iomap_invalidate_folio,
-};
-
 void mark_ntfs_record_dirty(struct folio *folio)
 {
 	iomap_dirty_folio(folio->mapping, folio);
@@ -556,7 +493,6 @@ int ntfs_dev_read(struct super_block *sb, void *buf, loff_t start, loff_t size)
 	loff_t offset, end = start + size;
 	u32 from, to, buf_off = 0;
 	struct folio *folio;
-	char *kaddr;
 
 	idx = start >> PAGE_SHIFT;
 	idx_end = end >> PAGE_SHIFT;
@@ -566,19 +502,17 @@ int ntfs_dev_read(struct super_block *sb, void *buf, loff_t start, loff_t size)
 		idx_end++;
 
 	for (; idx < idx_end; idx++, from = 0) {
-		folio = ntfs_read_mapping_folio(sb->s_bdev->bd_mapping, idx);
+		folio = read_mapping_folio(sb->s_bdev->bd_mapping, idx, NULL);
 		if (IS_ERR(folio)) {
 			ntfs_error(sb, "Unable to read %ld page", idx);
 			return PTR_ERR(folio);
 		}
 
-		kaddr = kmap_local_folio(folio, 0);
 		offset = (loff_t)idx << PAGE_SHIFT;
 		to = min_t(u32, end - offset, PAGE_SIZE);
 
-		memcpy(buf + buf_off, kaddr + from, to);
+		memcpy_from_folio(buf + buf_off, folio, from, to);
 		buf_off += to;
-		kunmap_local(kaddr);
 		folio_put(folio);
 	}
 
@@ -592,7 +526,6 @@ int ntfs_dev_write(struct super_block *sb, void *buf, loff_t start,
 	loff_t offset, end = start + size;
 	u32 from, to, buf_off = 0;
 	struct folio *folio;
-	char *kaddr;
 
 	idx = start >> PAGE_SHIFT;
 	idx_end = end >> PAGE_SHIFT;
@@ -602,19 +535,17 @@ int ntfs_dev_write(struct super_block *sb, void *buf, loff_t start,
 		idx_end++;
 
 	for (; idx < idx_end; idx++, from = 0) {
-		folio = ntfs_read_mapping_folio(sb->s_bdev->bd_mapping, idx);
+		folio = read_mapping_folio(sb->s_bdev->bd_mapping, idx, NULL);
 		if (IS_ERR(folio)) {
 			ntfs_error(sb, "Unable to read %ld page", idx);
 			return PTR_ERR(folio);
 		}
 
-		kaddr = kmap_local_folio(folio, 0);
 		offset = (loff_t)idx << PAGE_SHIFT;
 		to = min_t(u32, end - offset, PAGE_SIZE);
 
-		memcpy(kaddr + from, buf + buf_off, to);
+		memcpy_to_folio(folio, from, buf + buf_off, to);
 		buf_off += to;
-		kunmap_local(kaddr);
 		folio_mark_uptodate(folio);
 		folio_mark_dirty(folio);
 		if (wait)

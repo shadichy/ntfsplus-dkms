@@ -15,7 +15,7 @@
 
 #include "lcnalloc.h"
 #include "bitmap.h"
-#include "misc.h"
+#include "malloc.h"
 #include "aops.h"
 #include "ntfs.h"
 
@@ -306,7 +306,8 @@ struct runlist_element *ntfs_cluster_alloc(struct ntfs_volume *vol, const s64 st
 				need_writeback = 0;
 			}
 			folio_unlock(folio);
-			ntfs_unmap_folio(folio, buf);
+			kunmap_local(buf);
+			folio_put(folio);
 			folio = NULL;
 		}
 
@@ -322,7 +323,7 @@ struct runlist_element *ntfs_cluster_alloc(struct ntfs_volume *vol, const s64 st
 		if (vol->lcn_empty_bits_per_page[index] == 0)
 			goto next_bmp_pos;
 
-		folio = ntfs_read_mapping_folio(mapping, index);
+		folio = read_mapping_folio(mapping, index, NULL);
 		if (IS_ERR(folio)) {
 			err = PTR_ERR(folio);
 			ntfs_error(vol->sb, "Failed to map page.");
@@ -697,7 +698,8 @@ out:
 			need_writeback = 0;
 		}
 		folio_unlock(folio);
-		ntfs_unmap_folio(folio, buf);
+		kunmap_local(buf);
+		folio_put(folio);
 	}
 	if (likely(!err)) {
 		if (is_dealloc == true)
@@ -960,11 +962,11 @@ s64 __ntfs_cluster_free(struct ntfs_inode *ni, const s64 start_vcn, s64 count,
 				sector_t start_sector, end_sector;
 				int ret;
 
-				start_sector = ALIGN((rl->lcn + rl_off) << vol->cluster_size_bits,
+				start_sector = ALIGN(NTFS_CLU_TO_B(vol, rl->lcn + rl_off),
 						     gran) >> SECTOR_SHIFT;
-				end_sector = ALIGN_DOWN((rl->lcn + rl_off + to_discard) <<
-							vol->cluster_size_bits, gran) >>
-							SECTOR_SHIFT;
+				end_sector = ALIGN_DOWN(NTFS_CLU_TO_B(vol,
+							rl->lcn + rl_off + to_discard),
+							gran) >> SECTOR_SHIFT;
 				if (start_sector < end_sector) {
 					ret = blkdev_issue_discard(vol->sb->s_bdev, start_sector,
 								   end_sector - start_sector,

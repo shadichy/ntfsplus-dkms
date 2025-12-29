@@ -7,7 +7,7 @@
  * Copyright (c) 2001-2006 Anton Altaparmakov
  */
 
-#include "misc.h"
+#include "malloc.h"
 #include "ntfs.h"
 
 __le16 *generate_default_upcase(void)

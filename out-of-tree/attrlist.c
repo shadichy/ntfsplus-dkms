@@ -12,7 +12,7 @@
 
 #include "mft.h"
 #include "attrib.h"
-#include "misc.h"
+#include "malloc.h"
 #include "attrlist.h"
 
 /**

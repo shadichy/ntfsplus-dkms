@@ -16,7 +16,7 @@
  * Copyright (c) 2007-2022 Jean-Pierre Andre
  */
 
-#include "misc.h"
+#include "malloc.h"
 #include "ntfs.h"
 #include "attrib.h"
 
@@ -1550,7 +1550,7 @@ s64 ntfs_rl_get_compressed_size(struct ntfs_volume *vol, struct runlist_element 
 		} else
 			ret += rlc->length;
 	}
-	return ret << vol->cluster_size_bits;
+	return NTFS_CLU_TO_B(vol, ret);
 }
 
 static inline bool ntfs_rle_lcn_contiguous(struct runlist_element *left_rle,

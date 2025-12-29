@@ -11,7 +11,7 @@
  */
 
 #include "collate.h"
-#include "misc.h"
+#include "debug.h"
 #include "ntfs.h"
 
 static int ntfs_collate_binary(struct ntfs_volume *vol,

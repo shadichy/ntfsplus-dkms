@@ -6,7 +6,7 @@
  */
 
 #include "ntfs.h"
-#include "misc.h"
+#include "malloc.h"
 
 /*
  * IMPORTANT

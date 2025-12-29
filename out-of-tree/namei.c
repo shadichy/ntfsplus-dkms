@@ -11,7 +11,8 @@
 #include <linux/iversion.h>
 
 #include "ntfs.h"
-#include "misc.h"
+#include "malloc.h"
+#include "time.h"
 #include "index.h"
 #include "reparse.h"
 #include "ea.h"
@@ -490,7 +491,7 @@ static struct ntfs_inode *__ntfs_create(struct mnt_idmap *idmap, struct inode *d
 	 * Caller must call d_instantiate_new instead of d_instantiate.
 	 */
 	spin_lock(&vi->i_lock);
-	vi->i_state = I_NEW | I_CREATING;
+	inode_state_set(vi, I_NEW | I_CREATING);
 	spin_unlock(&vi->i_lock);
 
 	/* Add the inode to the inode hash for the superblock. */
@@ -565,7 +566,7 @@ static struct ntfs_inode *__ntfs_create(struct mnt_idmap *idmap, struct inode *d
 		ir->index_block_size = cpu_to_le32(ni->vol->index_record_size);
 		if (ni->vol->cluster_size <= ni->vol->index_record_size)
 			ir->clusters_per_index_block =
-				ni->vol->index_record_size >> ni->vol->cluster_size_bits;
+				NTFS_B_TO_CLU(vol, ni->vol->index_record_size);
 		else
 			ir->clusters_per_index_block =
 				ni->vol->index_record_size >> ni->vol->sector_size_bits;
@@ -680,7 +681,7 @@ static struct ntfs_inode *__ntfs_create(struct mnt_idmap *idmap, struct inode *d
 	set_nlink(vi, 1);
 	ntfs_set_vfs_operations(vi, mode, dev);
 
-#ifdef CONFIG_NTFSPLUS_FS_POSIX_ACL
+#ifdef CONFIG_NTFS_FS_POSIX_ACL
 	if (!S_ISLNK(mode) && (sb->s_flags & SB_POSIXACL)) {
 		err = ntfsp_init_acl(idmap, vi, dir);
 		if (err)

@@ -37,6 +37,28 @@
 
 #define UCHAR_T_SIZE_BITS 1
 
+#define NTFS_B_TO_CLU(vol, b) ((b) >> (vol)->cluster_size_bits)
+#define NTFS_CLU_TO_B(vol, clu) ((u64)(clu) << (vol)->cluster_size_bits)
+#define NTFS_B_TO_CLU_OFS(vol, clu) ((u64)(clu) & (vol)->cluster_size_mask)
+
+#define NTFS_MFT_NR_TO_CLU(vol, mft_no) (((u64)mft_no << (vol)->mft_record_size_bits) >> \
+					 (vol)->cluster_size_bits)
+#define NTFS_MFT_NR_TO_PIDX(vol, mft_no) (mft_no >> (PAGE_SHIFT - \
+					  (vol)->mft_record_size_bits))
+#define NTFS_MFT_NR_TO_POFS(vol, mft_no) (((u64)mft_no << (vol)->mft_record_size_bits) & \
+					  ~PAGE_MASK)
+
+#define NTFS_PIDX_TO_BLK(vol, idx) (((u64)idx << PAGE_SHIFT) >> \
+				    ((vol)->sb)->s_blocksize_bits)
+#define NTFS_PIDX_TO_CLU(vol, idx) (((u64)idx << PAGE_SHIFT) >> \
+				    (vol)->cluster_size_bits)
+#define NTFS_CLU_TO_PIDX(vol, clu) (((u64)(clu) << (vol)->cluster_size_bits) >> \
+				    PAGE_SHIFT)
+#define NTFS_CLU_TO_POFS(vol, clu) (((u64)(clu) << (vol)->cluster_size_bits) & \
+				    ~PAGE_MASK)
+
+#define NTFS_B_TO_SECTOR(vol, b) ((b) >> ((vol)->sb)->s_blocksize_bits)
+
 enum {
 	NTFS_BLOCK_SIZE		= 512,
 	NTFS_BLOCK_SIZE_BITS	= 9,
@@ -60,9 +82,7 @@ extern struct kmem_cache *ntfs_attr_ctx_cache;
 extern struct kmem_cache *ntfs_index_ctx_cache;
 
 /* The various operations structs defined throughout the driver files. */
-extern const struct address_space_operations ntfs_normal_aops;
-extern const struct address_space_operations ntfs_compressed_aops;
-extern const struct address_space_operations ntfs_mst_aops;
+extern const struct address_space_operations ntfs_aops;
 
 extern const struct  file_operations ntfs_file_ops;
 extern const struct inode_operations ntfs_file_inode_ops;

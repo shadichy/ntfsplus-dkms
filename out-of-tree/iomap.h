@@ -22,5 +22,5 @@ extern const struct iomap_ops ntfs_page_mkwrite_iomap_ops;
 extern const struct iomap_ops ntfs_dio_iomap_ops;
 extern const struct iomap_writeback_ops ntfs_writeback_ops;
 extern const struct iomap_write_ops ntfs_iomap_folio_ops;
-int ntfs_zeroed_clusters(struct inode *vi, s64 lcn, s64 num);
+extern int ntfs_zero_range(struct inode *inode, loff_t offset, loff_t length, bool bdirect);
 #endif /* _LINUX_NTFS_IOMAP_H */

@@ -21,7 +21,7 @@ int ntfsp_trim_fs(struct ntfs_volume *vol, struct fstrim_range *range)
 	unsigned long *bitmap;
 	char *kaddr;
 	u64 end, trimmed = 0, start_buf, end_buf, end_cluster;
-	u64 start_cluster = range->start >> vol->cluster_size_bits;
+	u64 start_cluster = NTFS_B_TO_CLU(vol, range->start);
 	u32 dq = bdev_discard_granularity(vol->sb->s_bdev);
 	int ret = 0;
 
@@ -34,8 +34,8 @@ int ntfsp_trim_fs(struct ntfs_volume *vol, struct fstrim_range *range)
 	if (range->len == (u64)-1)
 		end_cluster = vol->nr_clusters;
 	else {
-		end_cluster = (range->start + range->len + vol->cluster_size - 1) >>
-			vol->cluster_size_bits;
+		end_cluster = NTFS_B_TO_CLU(vol,
+				(range->start + range->len + vol->cluster_size - 1));
 		if (end_cluster > vol->nr_clusters)
 			end_cluster = vol->nr_clusters;
 	}
@@ -53,7 +53,7 @@ int ntfsp_trim_fs(struct ntfs_volume *vol, struct fstrim_range *range)
 		if (IS_ERR(folio)) {
 			page_cache_sync_readahead(vol->lcnbmp_ino->i_mapping, ra, NULL,
 					index, end_index - index);
-			folio = ntfs_read_mapping_folio(vol->lcnbmp_ino->i_mapping, index);
+			folio = read_mapping_folio(vol->lcnbmp_ino->i_mapping, index, NULL);
 			if (!IS_ERR(folio))
 				folio_lock(folio);
 		}
@@ -79,8 +79,8 @@ int ntfsp_trim_fs(struct ntfs_volume *vol, struct fstrim_range *range)
 			end = find_next_bit(bitmap, end_buf - start_buf,
 					start - start_buf) + start_buf;
 
-			aligned_start = ALIGN(start << vol->cluster_size_bits, dq);
-			aligned_count = ALIGN_DOWN((end - start) << vol->cluster_size_bits, dq);
+			aligned_start = ALIGN(NTFS_CLU_TO_B(vol, start), dq);
+			aligned_count = ALIGN_DOWN(NTFS_CLU_TO_B(vol, end - start), dq);
 			if (aligned_count >= range->minlen) {
 				ret = blkdev_issue_discard(vol->sb->s_bdev, aligned_start >> 9,
 						aligned_count >> 9, GFP_NOFS);
@@ -150,7 +150,7 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 
 	/* Get the page containing the first bit (@start_bit). */
 	mapping = vi->i_mapping;
-	folio = ntfs_read_mapping_folio(mapping, index);
+	folio = read_mapping_folio(mapping, index, NULL);
 	if (IS_ERR(folio)) {
 		if (!is_rollback)
 			ntfs_error(vi->i_sb,
@@ -211,8 +211,9 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 		flush_dcache_folio(folio);
 		folio_mark_dirty(folio);
 		folio_unlock(folio);
-		ntfs_unmap_folio(folio, kaddr);
-		folio = ntfs_read_mapping_folio(mapping, ++index);
+		kunmap_local(kaddr);
+		folio_put(folio);
+		folio = read_mapping_folio(mapping, ++index, NULL);
 		if (IS_ERR(folio)) {
 			ntfs_error(vi->i_sb,
 				   "Failed to map subsequent page (error %li), aborting.",
@@ -258,7 +259,8 @@ done:
 	flush_dcache_folio(folio);
 	folio_mark_dirty(folio);
 	folio_unlock(folio);
-	ntfs_unmap_folio(folio, kaddr);
+	kunmap_local(kaddr);
+	folio_put(folio);
 	ntfs_debug("Done.");
 	return 0;
 rollback:

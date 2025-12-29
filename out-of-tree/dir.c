@@ -287,7 +287,7 @@ found_it:
 
 	/*
 	 * We are done with the index root and the mft record. Release them,
-	 * otherwise we deadlock with ntfs_read_mapping_folio().
+	 * otherwise we deadlock with read_mapping_folio().
 	 */
 	ntfs_attr_put_search_ctx(ctx);
 	unmap_mft_record(dir_ni);
@@ -307,8 +307,8 @@ descend_into_child_node:
 	 * of PAGE_SIZE and map the page cache page, reading it from
 	 * disk if necessary.
 	 */
-	folio = ntfs_read_mapping_folio(ia_mapping, vcn <<
-			dir_ni->itype.index.vcn_size_bits >> PAGE_SHIFT);
+	folio = read_mapping_folio(ia_mapping, vcn <<
+			dir_ni->itype.index.vcn_size_bits >> PAGE_SHIFT, NULL);
 	if (IS_ERR(folio)) {
 		ntfs_error(sb, "Failed to map directory index page, error %ld.",
 				-PTR_ERR(folio));
@@ -557,8 +557,8 @@ found_it2:
 			 * If vcn is in the same page cache page as old_vcn we
 			 * recycle the mapped page.
 			 */
-			if ((old_vcn << vol->cluster_size_bits >> PAGE_SHIFT) ==
-			    (vcn << vol->cluster_size_bits >> PAGE_SHIFT))
+			if (NTFS_CLU_TO_PIDX(vol, old_vcn) ==
+			    NTFS_CLU_TO_PIDX(vol, vcn))
 				goto fast_descend_into_child_node;
 			kfree(kaddr);
 			kaddr = NULL;
@@ -934,8 +934,7 @@ nextdir:
 
 		actor->pos = ie_pos;
 
-		index = (MREF_LE(next->data.dir.indexed_file) <<
-				vol->mft_record_size_bits) >> PAGE_SHIFT;
+		index = NTFS_MFT_NR_TO_PIDX(vol, MREF_LE(next->data.dir.indexed_file));
 		if (nir) {
 			struct ntfs_index_ra *cnir;
 			struct rb_node *node = ra_root.rb_node;

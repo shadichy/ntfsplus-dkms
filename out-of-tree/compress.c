@@ -23,9 +23,9 @@
 
 #include "attrib.h"
 #include "inode.h"
-#include "misc.h"
+#include "debug.h"
 #include "ntfs.h"
-#include "misc.h"
+#include "malloc.h"
 #include "aops.h"
 #include "lcnalloc.h"
 #include "mft.h"
@@ -504,15 +504,14 @@ int ntfs_read_compressed_block(struct folio *folio)
 	s64 end_vcn = ((((s64)(index + 1UL) << PAGE_SHIFT) + cb_size - 1)
 			& ~cb_size_mask) >> vol->cluster_size_bits;
 	/* Number of compression blocks (cbs) in the wanted vcn range. */
-	unsigned int nr_cbs = (end_vcn - start_vcn) << vol->cluster_size_bits
-			>> ni->itype.compressed.block_size_bits;
+	unsigned int nr_cbs = NTFS_CLU_TO_B(vol, end_vcn - start_vcn) >>
+		ni->itype.compressed.block_size_bits;
 	/*
 	 * Number of pages required to store the uncompressed data from all
 	 * compression blocks (cbs) overlapping @page. Due to alignment
 	 * guarantees of start_vcn and end_vcn, no need to round up here.
 	 */
-	unsigned int nr_pages = (end_vcn - start_vcn) <<
-			vol->cluster_size_bits >> PAGE_SHIFT;
+	unsigned int nr_pages = NTFS_CLU_TO_PIDX(vol, end_vcn - start_vcn);
 	unsigned int xpage, max_page, cur_page, cur_ofs, i, page_ofs, page_index;
 	unsigned int cb_clusters, cb_max_ofs;
 	int cb_max_page, err = 0;
@@ -547,7 +546,7 @@ int ntfs_read_compressed_block(struct folio *folio)
 	 * We have already been given one page, this is the one we must do.
 	 * Once again, the alignment guarantees keep it simple.
 	 */
-	offset = start_vcn << vol->cluster_size_bits >> PAGE_SHIFT;
+	offset = NTFS_CLU_TO_PIDX(vol, start_vcn);
 	xpage = index - offset;
 	pages[xpage] = page;
 	/*
@@ -658,15 +657,12 @@ lock_retry_remap:
 			goto map_rl_err;
 		}
 
-		page_ofs = (lcn << vol->cluster_size_bits) & ~PAGE_MASK;
-		page_index = (lcn << vol->cluster_size_bits) >> PAGE_SHIFT;
+		page_ofs = NTFS_CLU_TO_POFS(vol, lcn);
+		page_index = NTFS_CLU_TO_PIDX(vol, lcn);
 
-retry:
 		lpage = read_mapping_page(sb->s_bdev->bd_mapping,
 					  page_index, NULL);
-		if (PTR_ERR(page) == -EINTR)
-			goto retry;
-		else if (IS_ERR(lpage)) {
+		if (IS_ERR(lpage)) {
 			err = PTR_ERR(lpage);
 			mutex_unlock(&ntfs_cb_lock);
 			goto read_err;
@@ -1396,8 +1392,8 @@ static int ntfs_write_cb(struct ntfs_inode *ni, loff_t pos, struct page **pages,
 		bio_size = insz;
 	}
 
-	new_vcn = (pos & ~(ni->itype.compressed.block_size - 1)) >> vol->cluster_size_bits;
-	new_length = round_up(bio_size, vol->cluster_size) >> vol->cluster_size_bits;
+	new_vcn = NTFS_B_TO_CLU(vol, pos & ~(ni->itype.compressed.block_size - 1));
+	new_length = NTFS_B_TO_CLU(vol, round_up(bio_size, vol->cluster_size));
 
 	err = ntfs_non_resident_attr_punch_hole(ni, new_vcn, ni->itype.compressed.block_clusters);
 	if (err < 0)
@@ -1447,11 +1443,10 @@ static int ntfs_write_cb(struct ntfs_inode *ni, loff_t pos, struct page **pages,
 
 setup_bio:
 		if (!bio) {
-			bio = ntfs_setup_bio(vol, REQ_OP_WRITE, bio_lcn + i, 0);
-			if (!bio) {
-				err = -ENOMEM;
-				goto out;
-			}
+			bio = bio_alloc(vol->sb->s_bdev, 1, REQ_OP_WRITE,
+					GFP_NOIO);
+			bio->bi_iter.bi_sector =
+				NTFS_B_TO_SECTOR(vol, NTFS_CLU_TO_B(vol, bio_lcn + i));
 		}
 
 		if (!bio_add_page(bio, pages[i], page_size, 0)) {
@@ -1519,7 +1514,7 @@ int ntfs_compress_write(struct ntfs_inode *ni, loff_t pos, size_t count,
 		}
 
 		for (i = 0; i < pages_per_cb; i++) {
-			folio = ntfs_read_mapping_folio(mapping, index + i);
+			folio = read_mapping_folio(mapping, index + i, NULL);
 			if (IS_ERR(folio)) {
 				for (ip = 0; ip < i; ip++) {
 					folio_unlock(page_folio(pages[ip]));

@@ -12,7 +12,7 @@ int ntfs_ea_set_wsl_inode(struct inode *inode, dev_t rdev, __le16 *ea_size,
 		unsigned int flags);
 ssize_t ntfsp_listxattr(struct dentry *dentry, char *buffer, size_t size);
 
-#ifdef CONFIG_NTFSPLUS_FS_POSIX_ACL
+#ifdef CONFIG_NTFS_FS_POSIX_ACL
 struct posix_acl *ntfsp_get_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 			       int type);
 int ntfsp_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,

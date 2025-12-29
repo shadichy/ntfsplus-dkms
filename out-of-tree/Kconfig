@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: GPL-2.0-only
-config NTFSPLUS_FS
-	tristate "NTFS+ file system support"
+config NTFS_FS
+	tristate "NTFS file system support"
+	depends on !DEFAULT_NTFS3 || m
 	select NLS
 	help
 	  NTFS is the file system of Microsoft Windows NT, 2000, XP and 2003.
 	  This allows you to mount devices formatted with the ntfs file system.
 
 	  To compile this as a module, choose M here: the module will be called
-	  ntfsplus.
+	  ntfs.
 
-config NTFSPLUS_DEBUG
-	bool "NTFS+ debugging support"
-	depends on NTFSPLUS_FS
+config NTFS_DEBUG
+	bool "NTFS debugging support"
+	depends on NTFS_FS
 	help
 	  If you are experiencing any problems with the NTFS file system, say
 	  Y here.  This will result in additional consistency checks to be
@@ -31,9 +32,9 @@ config NTFSPLUS_DEBUG
 	  When reporting bugs, please try to have available a full dump of
 	  debugging messages while the misbehaviour was occurring.
 
-config NTFSPLUS_FS_POSIX_ACL
-	bool "NTFS+ POSIX Access Control Lists"
-	depends on NTFSPLUS_FS
+config NTFS_FS_POSIX_ACL
+	bool "NTFS POSIX Access Control Lists"
+	depends on NTFS_FS
 	select FS_POSIX_ACL
 	help
 	  POSIX Access Control Lists (ACLs) support additional access rights

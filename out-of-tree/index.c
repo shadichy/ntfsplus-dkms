@@ -17,7 +17,7 @@
 #include "collate.h"
 #include "index.h"
 #include "ntfs.h"
-#include "misc.h"
+#include "malloc.h"
 #include "attrlist.h"
 
 /*
@@ -911,9 +911,12 @@ static struct index_entry *ntfs_ie_get_median(struct index_header *ih)
 	return ie;
 }
 
-static s64 ntfs_ibm_vcn_to_pos(struct ntfs_index_context *icx, s64 vcn)
+static u64 ntfs_ibm_vcn_to_pos(struct ntfs_index_context *icx, s64 vcn)
 {
-	return ntfs_ib_vcn_to_pos(icx, vcn) / icx->block_size;
+	u64 pos = ntfs_ib_vcn_to_pos(icx, vcn);
+
+	do_div(pos, icx->block_size);
+	return pos;
 }
 
 static s64 ntfs_ibm_pos_to_vcn(struct ntfs_index_context *icx, s64 pos)
@@ -945,7 +948,7 @@ static int ntfs_ibm_add(struct ntfs_index_context *icx)
 static int ntfs_ibm_modify(struct ntfs_index_context *icx, s64 vcn, int set)
 {
 	u8 byte;
-	u64 pos = (u64)ntfs_ibm_vcn_to_pos(icx, vcn);
+	u64 pos = ntfs_ibm_vcn_to_pos(icx, vcn);
 	u32 bpos = pos / 8;
 	u32 bit = 1 << (pos % 8);
 	struct ntfs_inode *bmp_ni;

@@ -18,7 +18,7 @@
 #include "index.h"
 #include "lcnalloc.h"
 #include "reparse.h"
-#include "misc.h"
+#include "malloc.h"
 
 struct WSL_LINK_REPARSE_DATA {
 	__le32	type;

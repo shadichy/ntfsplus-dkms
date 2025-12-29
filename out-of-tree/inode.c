@@ -11,19 +11,20 @@
 
 // Replace inode_generic_drop with generic_drop_inode
 // for backward compatibility with pre 6.18 kernels
-#ifndef inode_generic_drop
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 #define inode_generic_drop generic_drop_inode
 #endif
 
 #include "lcnalloc.h"
-#include "misc.h"
+#include "malloc.h"
+#include "time.h"
 #include "ntfs.h"
 #include "index.h"
 #include "attrlist.h"
 #include "reparse.h"
 #include "ea.h"
 #include "attrib.h"
-#include "ntfs_iomap.h"
+#include "iomap.h"
 
 /**
  * ntfs_test_inode - compare two (possibly fake) inodes for equality
@@ -175,7 +176,7 @@ struct inode *ntfs_iget(struct super_block *sb, unsigned long mft_no)
 	err = 0;
 
 	/* If this is a freshly allocated inode, need to read it now. */
-	if (vi->i_state & I_NEW) {
+	if (inode_state_read_once(vi) & I_NEW) {
 		err = ntfs_read_locked_inode(vi);
 		unlock_new_inode(vi);
 	}
@@ -235,7 +236,7 @@ struct inode *ntfs_attr_iget(struct inode *base_vi, __le32 type,
 	err = 0;
 
 	/* If this is a freshly allocated inode, need to read it now. */
-	if (vi->i_state & I_NEW) {
+	if (inode_state_read_once(vi) & I_NEW) {
 		err = ntfs_read_locked_attr_inode(base_vi, vi);
 		unlock_new_inode(vi);
 	}
@@ -290,7 +291,7 @@ struct inode *ntfs_index_iget(struct inode *base_vi, __le16 *name,
 	err = 0;
 
 	/* If this is a freshly allocated inode, need to read it now. */
-	if (vi->i_state & I_NEW) {
+	if (inode_state_read_once(vi) & I_NEW) {
 		err = ntfs_read_locked_index_inode(base_vi, vi);
 		unlock_new_inode(vi);
 	}
@@ -382,7 +383,7 @@ int ntfs_drop_big_inode(struct inode *inode)
 {
 	struct ntfs_inode *ni = NTFS_I(inode);
 
-	if (!inode_unhashed(inode) && inode->i_state & I_SYNC) {
+	if (!inode_unhashed(inode) && inode_state_read_once(inode) & I_SYNC) {
 		if (ni->type == AT_DATA || ni->type == AT_INDEX_ALLOCATION) {
 			if (!inode->i_nlink) {
 				struct ntfs_inode *ni = NTFS_I(inode);
@@ -436,7 +437,7 @@ static void ntfs_destroy_extent_inode(struct ntfs_inode *ni)
 	if (!atomic_dec_and_test(&ni->count))
 		WARN_ON(1);
 	if (ni->folio)
-		ntfs_unmap_folio(ni->folio, NULL);
+		folio_put(ni->folio);
 	kfree(ni->mrec);
 	kmem_cache_free(ntfs_inode_cache, ni);
 }
@@ -624,15 +625,12 @@ void ntfs_set_vfs_operations(struct inode *inode, mode_t mode, dev_t dev)
 			inode->i_op = &ntfs_dir_inode_ops;
 			inode->i_fop = &ntfs_dir_ops;
 		}
-		if (NInoMstProtected(NTFS_I(inode)))
-			inode->i_mapping->a_ops = &ntfs_mst_aops;
-		else
-			inode->i_mapping->a_ops = &ntfs_normal_aops;
+		inode->i_mapping->a_ops = &ntfs_aops;
 		lockdep_set_class(&inode->i_mapping->invalidate_lock,
 				  &ntfs_dir_inval_lock_key);
 	} else if (S_ISLNK(mode)) {
 		inode->i_op = &ntfs_symlink_inode_operations;
-		inode->i_mapping->a_ops = &ntfs_normal_aops;
+		inode->i_mapping->a_ops = &ntfs_aops;
 	} else if (S_ISCHR(mode) || S_ISBLK(mode) || S_ISFIFO(mode) || S_ISSOCK(mode)) {
 		inode->i_op = &ntfsp_special_inode_operations;
 		init_special_inode(inode, inode->i_mode, dev);
@@ -641,12 +639,7 @@ void ntfs_set_vfs_operations(struct inode *inode, mode_t mode, dev_t dev)
 			inode->i_op = &ntfs_file_inode_ops;
 			inode->i_fop = &ntfs_file_ops;
 		}
-		if (NInoMstProtected(NTFS_I(inode)))
-			inode->i_mapping->a_ops = &ntfs_mst_aops;
-		else if (NInoCompressed(NTFS_I(inode)))
-			inode->i_mapping->a_ops = &ntfs_compressed_aops;
-		else
-			inode->i_mapping->a_ops = &ntfs_normal_aops;
+		inode->i_mapping->a_ops = &ntfs_aops;
 	}
 }
 
@@ -1425,11 +1418,7 @@ static int ntfs_read_locked_attr_inode(struct inode *base_vi, struct inode *vi)
 		ni->initialized_size = le64_to_cpu(a->data.non_resident.initialized_size);
 		ni->allocated_size = le64_to_cpu(a->data.non_resident.allocated_size);
 	}
-	vi->i_mapping->a_ops = &ntfs_normal_aops;
-	if (NInoMstProtected(ni))
-		vi->i_mapping->a_ops = &ntfs_mst_aops;
-	else if (NInoCompressed(ni))
-		vi->i_mapping->a_ops = &ntfs_compressed_aops;
+	vi->i_mapping->a_ops = &ntfs_aops;
 	if ((NInoCompressed(ni) || NInoSparse(ni)) && ni->type != AT_INDEX_ROOT)
 		vi->i_blocks = ni->itype.compressed.size >> 9;
 	else
@@ -1774,8 +1763,8 @@ static int load_attribute_list_mount(struct ntfs_volume *vol,
 			goto err_out;
 		}
 
-		rl_byte_off = lcn << vol->cluster_size_bits;
-		rl_byte_len = rl->length << vol->cluster_size_bits;
+		rl_byte_off = NTFS_CLU_TO_B(vol, lcn);
+		rl_byte_len = NTFS_CLU_TO_B(vol, rl->length);
 
 		if (al + rl_byte_len > al_end)
 			rl_byte_len = al_end - al;
@@ -1897,12 +1886,12 @@ int ntfs_read_inode_mount(struct inode *vi)
 	}
 
 	/* Determine the first block of the $MFT/$DATA attribute. */
-	nr_blocks = vol->mft_record_size >> sb->s_blocksize_bits;
+	nr_blocks = NTFS_B_TO_SECTOR(vol, vol->mft_record_size);
 	if (!nr_blocks)
 		nr_blocks = 1;
 
 	/* Load $MFT/$DATA's first mft record. */
-	err = ntfs_dev_read(sb, m, vol->mft_lcn << vol->cluster_size_bits, i);
+	err = ntfs_dev_read(sb, m, NTFS_CLU_TO_B(vol, vol->mft_lcn), i);
 	if (err) {
 		ntfs_error(sb, "Device read failed.");
 		goto err_out;
@@ -1929,7 +1918,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 	vi->i_generation = ni->seq_no = le16_to_cpu(m->sequence_number);
 
 	/* Provides read_folio() for map_mft_record(). */
-	vi->i_mapping->a_ops = &ntfs_mst_aops;
+	vi->i_mapping->a_ops = &ntfs_aops;
 
 	ctx = ntfs_attr_get_search_ctx(ni, m);
 	if (!ctx) {
@@ -2118,8 +2107,8 @@ int ntfs_read_inode_mount(struct inode *vi)
 				goto put_err_out;
 			}
 			/* Get the last vcn in the $DATA attribute. */
-			last_vcn = le64_to_cpu(a->data.non_resident.allocated_size) >>
-				vol->cluster_size_bits;
+			last_vcn = NTFS_B_TO_CLU(vol,
+					le64_to_cpu(a->data.non_resident.allocated_size));
 			/* Fill in the inode size. */
 			vi->i_size = le64_to_cpu(a->data.non_resident.data_size);
 			ni->initialized_size = le64_to_cpu(a->data.non_resident.initialized_size);
@@ -2353,7 +2342,7 @@ release:
 	if (!atomic_dec_and_test(&ni->count))
 		WARN_ON(1);
 	if (ni->folio)
-		ntfs_unmap_folio(ni->folio, NULL);
+		folio_put(ni->folio);
 	kfree(ni->mrec);
 	ntfs_free(ni->target);
 }
@@ -2690,6 +2679,38 @@ int ntfs_inode_sync_filename(struct ntfs_inode *ni)
 	return err;
 }
 
+int ntfs_get_block_mft_record(struct ntfs_inode *mft_ni, struct ntfs_inode *ni)
+{
+	s64 vcn;
+	struct runlist_element *rl;
+
+	if (ni->mft_lcn[0] != LCN_RL_NOT_MAPPED)
+		return 0;
+
+	vcn = (s64)ni->mft_no << mft_ni->vol->mft_record_size_bits >>
+	      mft_ni->vol->cluster_size_bits;
+
+	rl = mft_ni->runlist.rl;
+	if (!rl) {
+		ntfs_error(mft_ni->vol->sb, "$MFT runlist is not present");
+		return -EIO;
+	}
+
+	/* Seek to element containing target vcn. */
+	while (rl->length && rl[1].vcn <= vcn)
+		rl++;
+	ni->mft_lcn[0] = ntfs_rl_vcn_to_lcn(rl, vcn);
+	ni->mft_lcn_count = 1;
+
+	if (mft_ni->vol->cluster_size < mft_ni->vol->mft_record_size &&
+	    (rl->length - (vcn - rl->vcn)) <= 1) {
+		rl++;
+		ni->mft_lcn[1] = ntfs_rl_vcn_to_lcn(rl, vcn + 1);
+		ni->mft_lcn_count++;
+	}
+	return 0;
+}
+
 /**
  * __ntfs_write_inode - write out a dirty inode
  * @vi:		inode to write out
@@ -2708,6 +2729,7 @@ int ntfs_inode_sync_filename(struct ntfs_inode *ni)
 int __ntfs_write_inode(struct inode *vi, int sync)
 {
 	struct ntfs_inode *ni = NTFS_I(vi);
+	struct ntfs_inode *mft_ni = NTFS_I(ni->vol->mft_ino);
 	struct mft_record *m;
 	int err = 0;
 	bool need_iput = false;
@@ -2767,11 +2789,37 @@ int __ntfs_write_inode(struct inode *vi, int sync)
 
 	/* Now the access times are updated, write the base mft record. */
 	if (NInoDirty(ni)) {
+		down_read(&mft_ni->runlist.lock);
+		err = ntfs_get_block_mft_record(mft_ni, ni);
+		up_read(&mft_ni->runlist.lock);
+		if (err)
+			goto unm_err_out;
+
 		err = write_mft_record(ni, m, sync);
 		if (err)
 			ntfs_error(vi->i_sb, "write_mft_record failed, err : %d\n", err);
 	}
 	unmap_mft_record(ni);
+
+	/* Map any unmapped extent mft records with LCNs. */
+	down_read(&mft_ni->runlist.lock);
+	mutex_lock(&ni->extent_lock);
+	if (ni->nr_extents > 0) {
+		int i;
+
+		for (i = 0; i < ni->nr_extents; i++) {
+			err = ntfs_get_block_mft_record(mft_ni,
+						   ni->ext.extent_ntfs_inos[i]);
+			if (err) {
+				mutex_unlock(&ni->extent_lock);
+				up_read(&mft_ni->runlist.lock);
+				mutex_unlock(&ni->mrec_lock);
+				goto err_out;
+			}
+		}
+	}
+	mutex_unlock(&ni->extent_lock);
+	up_read(&mft_ni->runlist.lock);
 
 	/* Write all attached extent mft records. */
 	mutex_lock(&ni->extent_lock);
@@ -3471,7 +3519,7 @@ s64 ntfs_inode_attr_pread(struct inode *vi, s64 pos, s64 count, u8 *buf)
 	index = pos >> PAGE_SHIFT;
 	do {
 		/* Update @index and get the next folio. */
-		folio = ntfs_read_mapping_folio(mapping, index);
+		folio = read_mapping_folio(mapping, index, NULL);
 		if (IS_ERR(folio))
 			break;
 
@@ -3604,18 +3652,33 @@ static s64 __ntfs_inode_non_resident_attr_pwrite(struct inode *vi,
 
 	index = pos >> PAGE_SHIFT;
 	while (count) {
-		folio = ntfs_read_mapping_folio(mapping, index);
-		if (IS_ERR(folio)) {
-			ret = PTR_ERR(folio);
-			ntfs_error(vi->i_sb, "Failed to read a page %lu for attr %#x: %ld",
-				   index, ni->type, PTR_ERR(folio));
-			break;
+		if (count == PAGE_SIZE) {
+			folio = __filemap_get_folio(vi->i_mapping, index,
+					FGP_CREAT | FGP_LOCK,
+					mapping_gfp_mask(mapping));
+			if (IS_ERR(folio)) {
+				ret = -ENOMEM;
+				break;
+			}
+		} else {
+			folio = read_mapping_folio(mapping, index, NULL);
+			if (IS_ERR(folio)) {
+				ret = PTR_ERR(folio);
+				ntfs_error(vi->i_sb, "Failed to read a page %lu for attr %#x: %ld",
+						index, ni->type, PTR_ERR(folio));
+				break;
+			}
+
+			folio_lock(folio);
 		}
 
-		folio_lock(folio);
-		offset = offset_in_folio(folio, pos);
-		attr_len = min_t(size_t, (size_t)count, folio_size(folio) - offset);
-
+		if (count == PAGE_SIZE) {
+			offset = 0;
+			attr_len = count;
+		} else {
+			offset = offset_in_folio(folio, pos);
+			attr_len = min_t(size_t, (size_t)count, folio_size(folio) - offset);
+		}
 		memcpy_to_folio(folio, offset, buf, attr_len);
 
 		if (sync) {
@@ -3627,8 +3690,8 @@ static s64 __ntfs_inode_non_resident_attr_pwrite(struct inode *vi,
 			s64 vcn;
 			struct runlist_element *rl;
 
-			lcn_count = max_t(s64, 1, attr_len >> vol->cluster_size_bits);
-			vcn = (s64)folio->index << PAGE_SHIFT >> vol->cluster_size_bits;
+			lcn_count = max_t(s64, 1, NTFS_B_TO_CLU(vol, attr_len));
+			vcn = NTFS_PIDX_TO_CLU(vol, folio->index);
 
 			do {
 				down_write(&ni->runlist.lock);
@@ -3653,15 +3716,14 @@ static s64 __ntfs_inode_non_resident_attr_pwrite(struct inode *vi,
 					lcn_folio_off &= vol->cluster_size_mask;
 				}
 
-				bio = ntfs_setup_bio(vol, REQ_OP_WRITE, lcn,
-						lcn_folio_off);
-				if (!bio) {
-					ret = -ENOMEM;
-					goto err_unlock_folio;
-				}
+				bio = bio_alloc(vol->sb->s_bdev, 1, REQ_OP_WRITE,
+						GFP_NOIO);
+				bio->bi_iter.bi_sector =
+					NTFS_B_TO_SECTOR(vol, NTFS_CLU_TO_B(vol, lcn) +
+							 lcn_folio_off);
 
 				length = min_t(unsigned long,
-					       rl_length << vol->cluster_size_bits,
+					       NTFS_CLU_TO_B(vol, rl_length),
 					       folio_size(folio));
 				if (!bio_add_folio(bio, folio, length, offset)) {
 					ret = -EIO;
@@ -3676,8 +3738,10 @@ static s64 __ntfs_inode_non_resident_attr_pwrite(struct inode *vi,
 			} while (lcn_count != 0);
 
 			folio_mark_uptodate(folio);
-		} else
+		} else {
+			folio_mark_uptodate(folio);
 			folio_mark_dirty(folio);
+		}
 err_unlock_folio:
 		folio_unlock(folio);
 		folio_put(folio);

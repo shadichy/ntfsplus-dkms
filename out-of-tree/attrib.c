@@ -22,11 +22,12 @@
 #include "attrib.h"
 #include "attrlist.h"
 #include "lcnalloc.h"
-#include "misc.h"
+#include "debug.h"
 #include "mft.h"
 #include "ntfs.h"
 #include "aops.h"
-#include "ntfs_iomap.h"
+#include "iomap.h"
+#include "malloc.h"
 
 __le16 AT_UNNAMED[] = { cpu_to_le16('\0') };
 
@@ -65,7 +66,7 @@ int ntfs_map_runlist_nolock(struct ntfs_inode *ni, s64 vcn, struct ntfs_attr_sea
 	struct runlist_element *rl;
 	struct folio *put_this_folio = NULL;
 	int err = 0;
-	bool ctx_is_temporary, ctx_needs_reset;
+	bool ctx_is_temporary = false, ctx_needs_reset;
 	struct ntfs_attr_search_ctx old_ctx = { NULL, };
 	size_t new_rl_count;
 
@@ -90,15 +91,13 @@ int ntfs_map_runlist_nolock(struct ntfs_inode *ni, s64 vcn, struct ntfs_attr_sea
 
 		WARN_ON(IS_ERR(ctx->mrec));
 		a = ctx->attr;
-		ctx_is_temporary = false;
 		if (!a->non_resident) {
 			err = -EIO;
 			goto err_out;
 		}
 		end_vcn = le64_to_cpu(a->data.non_resident.highest_vcn);
 		read_lock_irqsave(&ni->size_lock, flags);
-		allocated_size_vcn = ni->allocated_size >>
-				ni->vol->cluster_size_bits;
+		allocated_size_vcn = NTFS_B_TO_CLU(ni->vol, ni->allocated_size);
 		read_unlock_irqrestore(&ni->size_lock, flags);
 		if (!a->data.non_resident.lowest_vcn && end_vcn <= 0)
 			end_vcn = allocated_size_vcn - 1;
@@ -404,23 +403,38 @@ struct runlist_element *__ntfs_attr_find_vcn_nolock(struct runlist *runlist, con
 {
 	size_t lower_idx, upper_idx, idx;
 	struct runlist_element *run;
+	int rh = runlist->rl_hint;
 
 	if (runlist->count <= 1)
 		return ERR_PTR(-ENOENT);
 
-	run = &runlist->rl[0];
-	if (vcn < run->vcn)
-		return ERR_PTR(-ENOENT);
-	else if (vcn < run->vcn + run->length)
-		return run;
+	if (runlist->count - 1 > rh && runlist->rl[rh].vcn <= vcn) {
+		if (vcn < runlist->rl[rh].vcn + runlist->rl[rh].length)
+			return &runlist->rl[rh];
+		if (runlist->count - 2 == rh)
+			return ERR_PTR(-ENOENT);
+
+		lower_idx = rh + 1;
+	} else {
+		run = &runlist->rl[0];
+		if (vcn < run->vcn)
+			return ERR_PTR(-ENOENT);
+		else if (vcn < run->vcn + run->length) {
+			runlist->rl_hint = 0;
+			return run;
+		}
+
+		lower_idx = 1;
+	}
 
 	run = &runlist->rl[runlist->count - 2];
-	if (vcn >= run->vcn && vcn < run->vcn + run->length)
+	if (vcn >= run->vcn && vcn < run->vcn + run->length) {
+		runlist->rl_hint = runlist->count - 2;
 		return run;
+	}
 	if (vcn >= run->vcn + run->length)
 		return ERR_PTR(-ENOENT);
 
-	lower_idx = 1;
 	upper_idx = runlist->count - 2;
 
 	while (lower_idx <= upper_idx) {
@@ -431,8 +445,10 @@ struct runlist_element *__ntfs_attr_find_vcn_nolock(struct runlist *runlist, con
 			upper_idx = idx - 1;
 		else if (vcn >= run->vcn + run->length)
 			lower_idx = idx + 1;
-		else
+		else {
+			runlist->rl_hint = idx;
 			return run;
+		}
 	}
 
 	return ERR_PTR(-ENOENT);
@@ -1689,13 +1705,13 @@ int ntfs_attr_make_non_resident(struct ntfs_inode *ni, const u32 data_size)
 		}
 
 		/* Start by allocating clusters to hold the attribute value. */
-		rl = ntfs_cluster_alloc(vol, 0, new_size >>
-				vol->cluster_size_bits, -1, DATA_ZONE, true,
+		rl = ntfs_cluster_alloc(vol, 0, NTFS_B_TO_CLU(vol, new_size),
+				-1, DATA_ZONE, true,
 				false, false);
 		if (IS_ERR(rl)) {
 			err = PTR_ERR(rl);
 			ntfs_debug("Failed to allocate cluster%s, error code %i.",
-					(new_size >> vol->cluster_size_bits) > 1 ? "s" : "",
+					(NTFS_B_TO_CLU(vol, new_size)) > 1 ? "s" : "",
 					err);
 			goto folio_err_out;
 		}
@@ -1771,8 +1787,7 @@ int ntfs_attr_make_non_resident(struct ntfs_inode *ni, const u32 data_size)
 	a->name_offset = cpu_to_le16(name_ofs);
 	/* Setup the fields specific to non-resident attributes. */
 	a->data.non_resident.lowest_vcn = 0;
-	a->data.non_resident.highest_vcn = cpu_to_le64((new_size - 1) >>
-			vol->cluster_size_bits);
+	a->data.non_resident.highest_vcn = cpu_to_le64(NTFS_B_TO_CLU(vol, new_size - 1));
 	a->data.non_resident.mapping_pairs_offset = cpu_to_le16(mp_ofs);
 	memset(&a->data.non_resident.reserved, 0,
 			sizeof(a->data.non_resident.reserved));
@@ -1952,7 +1967,7 @@ int ntfs_attr_set(struct ntfs_inode *ni, s64 ofs, s64 cnt, const u8 val)
 
 	index = ofs >> PAGE_SHIFT;
 	while (cnt) {
-		folio = ntfs_read_mapping_folio(mapping, index);
+		folio = read_mapping_folio(mapping, index, NULL);
 		if (IS_ERR(folio)) {
 			ret = PTR_ERR(folio);
 			ntfs_error(VFS_I(ni)->i_sb, "Failed to read a page %lu for attr %#x: %ld",
@@ -2995,8 +3010,8 @@ int ntfs_attr_map_whole_runlist(struct ntfs_inode *ni)
 				goto err_out;
 			}
 			/* Get the last vcn in the attribute. */
-			last_vcn = le64_to_cpu(a->data.non_resident.allocated_size) >>
-				vol->cluster_size_bits;
+			last_vcn = NTFS_B_TO_CLU(vol,
+					le64_to_cpu(a->data.non_resident.allocated_size));
 		}
 
 		/* Get the lowest vcn for the next extent. */
@@ -3887,11 +3902,10 @@ static int ntfs_non_resident_attr_shrink(struct ntfs_inode *ni, const s64 newsiz
 		 * block to truncate the data, so we may leave more allocated
 		 * clusters than really needed.
 		 */
-		first_free_vcn = (((newsize - 1) | (ni->itype.compressed.block_size - 1)) + 1) >>
-			vol->cluster_size_bits;
+		first_free_vcn = NTFS_B_TO_CLU(vol,
+				((newsize - 1) | (ni->itype.compressed.block_size - 1)) + 1);
 	else
-		first_free_vcn = (newsize + vol->cluster_size - 1) >>
-			vol->cluster_size_bits;
+		first_free_vcn = NTFS_B_TO_CLU(vol, newsize + vol->cluster_size - 1);
 
 	if (first_free_vcn < 0)
 		return -EINVAL;
@@ -3899,7 +3913,7 @@ static int ntfs_non_resident_attr_shrink(struct ntfs_inode *ni, const s64 newsiz
 	 * Compare the new allocation with the old one and only deallocate
 	 * clusters if there is a change.
 	 */
-	if ((ni->allocated_size >> vol->cluster_size_bits) != first_free_vcn) {
+	if (NTFS_B_TO_CLU(vol, ni->allocated_size) != first_free_vcn) {
 		struct ntfs_attr_search_ctx *ctx;
 
 		err = ntfs_attr_map_whole_runlist(ni);
@@ -3936,12 +3950,12 @@ static int ntfs_non_resident_attr_shrink(struct ntfs_inode *ni, const s64 newsiz
 		}
 
 		/* Prepare to mapping pairs update. */
-		ni->allocated_size = first_free_vcn << vol->cluster_size_bits;
+		ni->allocated_size = NTFS_CLU_TO_B(vol, first_free_vcn);
 
 		if (NInoSparse(ni) || NInoCompressed(ni)) {
 			if (nr_freed_clusters) {
-				ni->itype.compressed.size -= nr_freed_clusters <<
-					vol->cluster_size_bits;
+				ni->itype.compressed.size -=
+					NTFS_CLU_TO_B(vol, nr_freed_clusters);
 				VFS_I(base_ni)->i_blocks = ni->itype.compressed.size >> 9;
 			}
 		} else
@@ -4053,11 +4067,9 @@ static int ntfs_non_resident_attr_expand(struct ntfs_inode *ni, const s64 newsiz
 
 	/* The first cluster outside the new allocation. */
 	if (prealloc_size)
-		first_free_vcn = (prealloc_size + vol->cluster_size - 1) >>
-			vol->cluster_size_bits;
+		first_free_vcn = NTFS_B_TO_CLU(vol, prealloc_size + vol->cluster_size - 1);
 	else
-		first_free_vcn = (newsize + vol->cluster_size - 1) >>
-			vol->cluster_size_bits;
+		first_free_vcn = NTFS_B_TO_CLU(vol, newsize + vol->cluster_size - 1);
 	if (first_free_vcn < 0)
 		return -EFBIG;
 
@@ -4065,7 +4077,7 @@ static int ntfs_non_resident_attr_expand(struct ntfs_inode *ni, const s64 newsiz
 	 * Compare the new allocation with the old one and only allocate
 	 * clusters if there is a change.
 	 */
-	if ((ni->allocated_size >> vol->cluster_size_bits) < first_free_vcn) {
+	if (NTFS_B_TO_CLU(vol, ni->allocated_size) < first_free_vcn) {
 		err = ntfs_attr_map_whole_runlist(ni);
 		if (err) {
 			ntfs_error(sb, "ntfs_attr_map_whole_runlist failed");
@@ -4081,12 +4093,11 @@ static int ntfs_non_resident_attr_expand(struct ntfs_inode *ni, const s64 newsiz
 			if (NInoCompressed(ni)) {
 				int last = 0, i = 0;
 				s64 alloc_size;
-				int more_entries =
-					round_up(first_free_vcn -
-						 (ni->allocated_size >>
-						  vol->cluster_size_bits),
-						 ni->itype.compressed.block_clusters) /
-					ni->itype.compressed.block_clusters;
+				u64 more_entries = round_up(first_free_vcn -
+						 NTFS_B_TO_CLU(vol, ni->allocated_size),
+						 ni->itype.compressed.block_clusters);
+
+				do_div(more_entries, ni->itype.compressed.block_clusters);
 
 				while (ni->runlist.rl[last].length)
 					last++;
@@ -4100,8 +4111,8 @@ static int ntfs_non_resident_attr_expand(struct ntfs_inode *ni, const s64 newsiz
 
 				alloc_size = ni->allocated_size;
 				while (i++ < more_entries) {
-					rl[last].vcn = round_up(alloc_size, vol->cluster_size) >>
-						vol->cluster_size_bits;
+					rl[last].vcn = NTFS_B_TO_CLU(vol,
+							round_up(alloc_size, vol->cluster_size));
 					rl[last].length = ni->itype.compressed.block_clusters -
 						(rl[last].vcn &
 						 (ni->itype.compressed.block_clusters - 1));
@@ -4123,11 +4134,10 @@ static int ntfs_non_resident_attr_expand(struct ntfs_inode *ni, const s64 newsiz
 					goto put_err_out;
 				}
 
-				rl[0].vcn = (ni->allocated_size >>
-						vol->cluster_size_bits);
+				rl[0].vcn = NTFS_B_TO_CLU(vol, ni->allocated_size);
 				rl[0].lcn = LCN_HOLE;
 				rl[0].length = first_free_vcn -
-					(ni->allocated_size >> vol->cluster_size_bits);
+					NTFS_B_TO_CLU(vol, ni->allocated_size);
 				rl[1].vcn = first_free_vcn;
 				rl[1].lcn = LCN_ENOENT;
 				rl[1].length = 0;
@@ -4158,16 +4168,13 @@ static int ntfs_non_resident_attr_expand(struct ntfs_inode *ni, const s64 newsiz
 					lcn_seek_from = rl->lcn + rl->length;
 			}
 
-			rl = ntfs_cluster_alloc(vol, ni->allocated_size >>
-					vol->cluster_size_bits, first_free_vcn -
-					(ni->allocated_size >>
-					 vol->cluster_size_bits), lcn_seek_from,
-					DATA_ZONE, false, false, false);
+			rl = ntfs_cluster_alloc(vol, NTFS_B_TO_CLU(vol, ni->allocated_size),
+					first_free_vcn - NTFS_B_TO_CLU(vol, ni->allocated_size),
+					lcn_seek_from, DATA_ZONE, false, false, false);
 			if (IS_ERR(rl)) {
 				ntfs_debug("Cluster allocation failed (%lld)",
 						(long long)first_free_vcn -
-						((long long)ni->allocated_size >>
-						 vol->cluster_size_bits));
+						NTFS_B_TO_CLU(vol, ni->allocated_size));
 				return PTR_ERR(rl);
 			}
 		}
@@ -4187,7 +4194,7 @@ static int ntfs_non_resident_attr_expand(struct ntfs_inode *ni, const s64 newsiz
 		}
 
 		/* Prepare to mapping pairs update. */
-		ni->allocated_size = first_free_vcn << vol->cluster_size_bits;
+		ni->allocated_size = NTFS_CLU_TO_B(vol, first_free_vcn);
 		err = ntfs_attr_update_mapping_pairs(ni, 0);
 		if (err) {
 			ntfs_debug("Mapping pairs update failed");
@@ -4226,15 +4233,14 @@ static int ntfs_non_resident_attr_expand(struct ntfs_inode *ni, const s64 newsiz
 	return 0;
 rollback:
 	/* Free allocated clusters. */
-	err2 = ntfs_cluster_free(ni, org_alloc_size >>
-				vol->cluster_size_bits, -1, ctx);
+	err2 = ntfs_cluster_free(ni, NTFS_B_TO_CLU(vol, org_alloc_size),
+				-1, ctx);
 	if (err2)
 		ntfs_debug("Leaking clusters");
 
 	/* Now, truncate the runlist itself. */
 	down_write(&ni->runlist.lock);
-	err2 = ntfs_rl_truncate_nolock(vol, &ni->runlist, org_alloc_size >>
-				vol->cluster_size_bits);
+	err2 = ntfs_rl_truncate_nolock(vol, &ni->runlist, NTFS_B_TO_CLU(vol, org_alloc_size));
 	up_write(&ni->runlist.lock);
 	if (err2) {
 		/*
@@ -4990,7 +4996,7 @@ int ntfs_non_resident_attr_insert_range(struct ntfs_inode *ni, s64 start_vcn, s6
 
 	if (NInoAttr(ni) || ni->type != AT_DATA)
 		return -EOPNOTSUPP;
-	if (start_vcn > (ni->allocated_size >> vol->cluster_size_bits))
+	if (start_vcn > NTFS_B_TO_CLU(vol, ni->allocated_size))
 		return -EINVAL;
 
 	hole_rl = ntfs_malloc_nofs(sizeof(*hole_rl) * 2);
@@ -5027,10 +5033,10 @@ int ntfs_non_resident_attr_insert_range(struct ntfs_inode *ni, s64 start_vcn, s6
 	ni->runlist.rl =  rl;
 	ni->runlist.count = new_rl_count;
 
-	ni->allocated_size += len << vol->cluster_size_bits;
-	ni->data_size += len << vol->cluster_size_bits;
-	if ((start_vcn << vol->cluster_size_bits) < ni->initialized_size)
-		ni->initialized_size += len << vol->cluster_size_bits;
+	ni->allocated_size += NTFS_CLU_TO_B(vol, len);
+	ni->data_size += NTFS_CLU_TO_B(vol, len);
+	if (NTFS_CLU_TO_B(vol, start_vcn) < ni->initialized_size)
+		ni->initialized_size += NTFS_CLU_TO_B(vol, len);
 	ret = ntfs_attr_update_mapping_pairs(ni, 0);
 	up_write(&ni->runlist.lock);
 	if (ret)
@@ -5071,7 +5077,7 @@ int ntfs_non_resident_attr_collapse_range(struct ntfs_inode *ni, s64 start_vcn, 
 	if (NInoAttr(ni) || ni->type != AT_DATA)
 		return -EOPNOTSUPP;
 
-	end_vcn = ni->allocated_size >> vol->cluster_size_bits;
+	end_vcn = NTFS_B_TO_CLU(vol, ni->allocated_size);
 	if (start_vcn >= end_vcn)
 		return -EINVAL;
 
@@ -5098,19 +5104,19 @@ int ntfs_non_resident_attr_collapse_range(struct ntfs_inode *ni, s64 start_vcn, 
 	ni->runlist.rl = rl;
 	ni->runlist.count = new_rl_cnt;
 
-	ni->allocated_size -= len << vol->cluster_size_bits;
-	if (ni->data_size > (start_vcn << vol->cluster_size_bits)) {
-		if (ni->data_size > (start_vcn + len) << vol->cluster_size_bits)
-			ni->data_size -= len << vol->cluster_size_bits;
+	ni->allocated_size -= NTFS_CLU_TO_B(vol, len);
+	if (ni->data_size > NTFS_CLU_TO_B(vol, start_vcn)) {
+		if (ni->data_size > NTFS_CLU_TO_B(vol, (start_vcn + len)))
+			ni->data_size -= NTFS_CLU_TO_B(vol, len);
 		else
-			ni->data_size = start_vcn << vol->cluster_size_bits;
+			ni->data_size = NTFS_CLU_TO_B(vol, start_vcn);
 	}
-	if (ni->initialized_size > (start_vcn << vol->cluster_size_bits)) {
+	if (ni->initialized_size > NTFS_CLU_TO_B(vol, start_vcn)) {
 		if (ni->initialized_size >
-		    (start_vcn + len) << vol->cluster_size_bits)
-			ni->initialized_size -= len << vol->cluster_size_bits;
+		    NTFS_CLU_TO_B(vol, start_vcn + len))
+			ni->initialized_size -= NTFS_CLU_TO_B(vol, len);
 		else
-			ni->initialized_size = start_vcn << vol->cluster_size_bits;
+			ni->initialized_size = NTFS_CLU_TO_B(vol, start_vcn);
 	}
 
 	if (ni->allocated_size > 0) {
@@ -5163,7 +5169,7 @@ int ntfs_non_resident_attr_punch_hole(struct ntfs_inode *ni, s64 start_vcn, s64 
 	if (NInoAttr(ni) || ni->type != AT_DATA)
 		return -EOPNOTSUPP;
 
-	end_vcn = ni->allocated_size >> vol->cluster_size_bits;
+	end_vcn = NTFS_B_TO_CLU(vol, ni->allocated_size);
 	if (start_vcn >= end_vcn)
 		return -EINVAL;
 
@@ -5280,11 +5286,9 @@ int ntfs_attr_fallocate(struct ntfs_inode *ni, loff_t start, loff_t byte_len, bo
 	if (!NInoNonResident(ni))
 		goto out;
 
-	vcn_start = (s64)(start >> vol->cluster_size_bits);
-	vcn_end = (s64)(round_up(start + byte_len, vol->cluster_size) >>
-			vol->cluster_size_bits);
-	vcn_uninit = (s64)(round_up(ni->initialized_size, vol->cluster_size) >>
-			       vol->cluster_size_bits);
+	vcn_start = (s64)NTFS_B_TO_CLU(vol, start);
+	vcn_end = (s64)NTFS_B_TO_CLU(vol, round_up(start + byte_len, vol->cluster_size));
+	vcn_uninit = (s64)NTFS_B_TO_CLU(vol, round_up(ni->initialized_size, vol->cluster_size));
 	vcn_uninit = min_t(s64, vcn_uninit, vcn_end);
 
 	/*
@@ -5322,7 +5326,10 @@ int ntfs_attr_fallocate(struct ntfs_inode *ni, loff_t start, loff_t byte_len, bo
 				if (err)
 					goto out;
 
-				err = ntfs_zeroed_clusters(VFS_I(ni), lcn, alloc_cnt);
+				err = ntfs_zero_range(VFS_I(ni),
+						      lcn << vol->cluster_size_bits,
+						      alloc_cnt << vol->cluster_size_bits,
+						      true);
 				if (err > 0)
 					goto out;
 

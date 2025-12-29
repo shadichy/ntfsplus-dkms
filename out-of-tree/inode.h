@@ -11,7 +11,7 @@
 #ifndef _LINUX_NTFS_INODE_H
 #define _LINUX_NTFS_INODE_H
 
-#include "misc.h"
+#include "debug.h"
 
 enum ntfs_inode_mutex_lock_class {
 	NTFS_INODE_MUTEX_PARENT,
@@ -330,6 +330,7 @@ int ntfsp_getattr(struct mnt_idmap *idmap, const struct path *path,
 		struct kstat *stat, unsigned int request_mask,
 		unsigned int query_flags);
 
+int ntfs_get_block_mft_record(struct ntfs_inode *mft_ni, struct ntfs_inode *ni);
 int __ntfs_write_inode(struct inode *vi, int sync);
 int ntfs_inode_attach_all_extents(struct ntfs_inode *ni);
 int ntfs_inode_add_attrlist(struct ntfs_inode *ni);
@@ -353,6 +354,17 @@ void ntfs_set_vfs_operations(struct inode *inode, mode_t mode, dev_t dev);
 /*
  * Wrappers for backward compatibility
  */
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
+// enum inode_state_flags_enum == enum inode_state_flags_t == u32
+static inline u32 inode_state_read_once(struct inode *inode) {
+	return inode->i_state;
+}
+static inline void inode_state_set(struct inode *inode, u32 flags) {
+	inode->i_state = flags;
+}
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 #define __iomap_file_buffered_write iomap_file_buffered_write
 #define __iomap_truncate_page iomap_truncate_page

@@ -18,7 +18,7 @@
 #include "index.h"
 #include "dir.h"
 #include "ea.h"
-#include "misc.h"
+#include "malloc.h"
 
 static int ntfs_write_ea(struct ntfs_inode *ni, int type, char *value, s64 ea_off,
 		s64 ea_size, bool need_truncate)
@@ -191,7 +191,7 @@ static int ntfs_set_ea(struct inode *inode, const char *name, size_t name_len,
 	struct ea_information *p_ea_info = NULL;
 	int ea_packed, err = 0;
 	struct ea_attr *p_ea;
-	unsigned short int ea_info_qsize;
+	unsigned short int ea_info_qsize = 0;
 	char *ea_buf = NULL;
 	size_t new_ea_size = ALIGN(struct_size(p_ea, ea_name, 1 + name_len + val_size), 4);
 	s64 ea_off, ea_info_size, all_ea_size, ea_size;
@@ -669,12 +669,10 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 		if (new_aflags & ATTR_IS_COMPRESSED) {
 			NInoSetCompressed(ni);
 			ni->flags |= FILE_ATTR_COMPRESSED;
-			VFS_I(ni)->i_mapping->a_ops = &ntfs_compressed_aops;
 		}
 	} else {
 		ni->flags &= ~(FILE_ATTR_SPARSE_FILE | FILE_ATTR_COMPRESSED);
 		a->data.non_resident.compression_unit = 0;
-		VFS_I(ni)->i_mapping->a_ops = &ntfs_normal_aops;
 		NInoClearSparse(ni);
 		NInoClearCompressed(ni);
 	}
@@ -704,16 +702,20 @@ static int ntfs_setxattr(const struct xattr_handler *handler,
 		return -EIO;
 
 	if (!strcmp(name, SYSTEM_DOS_ATTRIB)) {
-		if (sizeof(u8) != size)
+		if (sizeof(u8) != size) {
+			err = -EINVAL;
 			goto out;
+		}
 		fattr = cpu_to_le32(*(u8 *)value);
 		goto set_fattr;
 	}
 
 	if (!strcmp(name, SYSTEM_NTFS_ATTRIB) ||
 	    !strcmp(name, SYSTEM_NTFS_ATTRIB_BE)) {
-		if (size != sizeof(u32))
+		if (size != sizeof(u32)) {
+			err = -EINVAL;
 			goto out;
+		}
 		if (!strcmp(name, SYSTEM_NTFS_ATTRIB_BE))
 			fattr = cpu_to_le32(be32_to_cpu(*(__be32 *)value));
 		else
@@ -775,7 +777,7 @@ const struct xattr_handler * const ntfsp_xattr_handlers[] = {
 };
 // clang-format on
 
-#ifdef CONFIG_NTFSPLUS_FS_POSIX_ACL
+#ifdef CONFIG_NTFS_FS_POSIX_ACL
 struct posix_acl *ntfsp_get_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 			       int type)
 {
